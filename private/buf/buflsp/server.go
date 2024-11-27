@@ -20,36 +20,17 @@ package buflsp
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"runtime/debug"
-	"strings"
 
-	"github.com/bufbuild/buf/private/buf/bufformat"
+	internalfile "github.com/bufbuild/buf/private/buf/buflsp/file"
 	"github.com/bufbuild/protocompile/ast"
 	"go.lsp.dev/protocol"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 const (
-	serverName = "buf-lsp"
-)
-
-const (
-	semanticTypeType = iota
-	semanticTypeStruct
-	semanticTypeVariable
-	semanticTypeEnum
-	semanticTypeEnumMember
-	semanticTypeInterface
-	semanticTypeMethod
-	semanticTypeDecorator
-)
-
-var (
-	// These slices must match the order of the indices in the above const block.
-	semanticTypeLegend = []string{
-		"type", "struct", "variable", "enum",
-		"enumMember", "interface", "method", "decorator",
-	}
-	semanticModifierLegend = []string{}
+	LSPServerName = "buf-lsp"
 )
 
 // server is an implementation of protocol.Server.
@@ -86,22 +67,13 @@ func (s *server) Initialize(
 		return nil, err
 	}
 
-	info := &protocol.ServerInfo{Name: serverName}
+	if err := s.fileManager.Init(ctx, params.WorkspaceFolders); err != nil {
+		return nil, fmt.Errorf("file manager init: %w", err)
+	}
+
+	info := &protocol.ServerInfo{Name: LSPServerName}
 	if buildInfo, ok := debug.ReadBuildInfo(); ok {
 		info.Version = buildInfo.Main.Version
-	}
-
-	// The LSP protocol library doesn't actually provide SemanticTokensOptions
-	// correctly.
-	type SematicTokensLegend struct {
-		TokenTypes     []string `json:"tokenTypes"`
-		TokenModifiers []string `json:"tokenModifiers"`
-	}
-	type SemanticTokensOptions struct {
-		protocol.WorkDoneProgressOptions
-
-		Legend SematicTokensLegend `json:"legend"`
-		Full   bool                `json:"full"`
 	}
 
 	return &protocol.InitializeResult{
@@ -122,11 +94,8 @@ func (s *server) Initialize(
 			HoverProvider:              true,
 			SemanticTokensProvider: &SemanticTokensOptions{
 				WorkDoneProgressOptions: protocol.WorkDoneProgressOptions{WorkDoneProgress: true},
-				Legend: SematicTokensLegend{
-					TokenTypes:     semanticTypeLegend,
-					TokenModifiers: semanticModifierLegend,
-				},
-				Full: true,
+				Legend:                  SemanticTokensLegend,
+				Full:                    true,
 			},
 		},
 		ServerInfo: info,
@@ -174,26 +143,40 @@ func (s *server) DidOpen(
 	ctx context.Context,
 	params *protocol.DidOpenTextDocumentParams,
 ) error {
-	file := s.fileManager.Open(ctx, params.TextDocument.URI)
-	file.Update(ctx, params.TextDocument.Version, params.TextDocument.Text)
-	file.Refresh(context.WithoutCancel(ctx))
+	ol := internalfile.NewOverlay(
+		params.TextDocument.URI,
+		[]byte(params.TextDocument.Text),
+		params.TextDocument.Version,
+	)
+
+	if _, err := s.fileManager.Open(ctx, ol); err != nil {
+		return fmt.Errorf("file manager open: %w", err)
+	}
+
 	return nil
 }
 
-// DidOpen is called whenever the client opens a document. This is our signal to parse
+// DidChange is called whenever the client opens a document. This is our signal to parse
 // the file.
 func (s *server) DidChange(
 	ctx context.Context,
 	params *protocol.DidChangeTextDocumentParams,
 ) error {
-	file := s.fileManager.Get(params.TextDocument.URI)
-	if file == nil {
-		// Update for a file we don't know about? Seems bad!
-		return fmt.Errorf("received update for file that was not open: %q", params.TextDocument.URI)
+	if len(params.ContentChanges) == 0 {
+		return nil
 	}
 
-	file.Update(ctx, params.TextDocument.Version, params.ContentChanges[0].Text)
-	file.Refresh(context.WithoutCancel(ctx))
+	ol := internalfile.NewOverlay(
+		params.TextDocument.URI,
+		[]byte(params.ContentChanges[0].Text),
+		params.TextDocument.Version,
+	)
+
+	_, err := s.fileManager.Change(ctx, ol)
+	if err != nil {
+		return fmt.Errorf("file manager change: %w", err)
+	}
+
 	return nil
 }
 
@@ -202,57 +185,18 @@ func (s *server) Formatting(
 	ctx context.Context,
 	params *protocol.DocumentFormattingParams,
 ) ([]protocol.TextEdit, error) {
-	file := s.fileManager.Get(params.TextDocument.URI)
-	if file == nil {
-		// Format for a file we don't know about? Seems bad!
-		return nil, fmt.Errorf("received update for file that was not open: %q", params.TextDocument.URI)
+	fh, err := s.fileManager.Get(ctx, params.TextDocument.URI)
+	if err != nil {
+		return nil, fmt.Errorf("file manager get: %w", err)
 	}
 
-	// Currently we have no way to honor any of the parameters.
-	_ = params
-	if file.fileNode == nil {
-		return nil, nil
+	newtext, r, err := fh.Format()
+	if err != nil {
+		return nil, fmt.Errorf("file handle format: %w", err)
 	}
 
-	var out strings.Builder
-	if err := bufformat.FormatFileNode(&out, file.fileNode); err != nil {
-		return nil, err
-	}
-
-	newText := out.String()
-	// Avoid formatting the file if text has not changed.
-	if newText == file.text {
-		return nil, nil
-	}
-
-	// XXX: The current compiler does not expose a span for the full file. Instead of
-	// potentially undershooting the correct span (which can cause comments at the
-	// start and end of the file to be duplicated), we instead manually count up the
-	// number of lines in the file. This is comparatively cheap, compared to sending the
-	// entire file over a domain socket.
-	var lastLine, lastLineStart int
-	for i := 0; i < len(file.text); i++ {
-		// NOTE: we are iterating over bytes, not runes.
-		if file.text[i] == '\n' {
-			lastLine++
-			lastLineStart = i + 1 // Skip the \n.
-		}
-	}
-	lastChar := len(file.text[lastLineStart:]) - 1 // Bytes, not runes!
 	return []protocol.TextEdit{
-		{
-			Range: protocol.Range{
-				Start: protocol.Position{
-					Line:      0,
-					Character: 0,
-				},
-				End: protocol.Position{
-					Line:      uint32(lastLine),
-					Character: uint32(lastChar),
-				},
-			},
-			NewText: newText,
-		},
+		{NewText: newtext, Range: r},
 	}, nil
 }
 
@@ -268,38 +212,37 @@ func (s *server) DidClose(
 
 // -- Language functionality methods.
 
-// Definition is the entry point for hover inlays.
+// Hover is the entry point for hover inlays.
 func (s *server) Hover(
 	ctx context.Context,
 	params *protocol.HoverParams,
 ) (*protocol.Hover, error) {
-	file := s.fileManager.Get(params.TextDocument.URI)
-	if file == nil {
-		return nil, nil
+	fh, err := s.fileManager.Get(ctx, params.TextDocument.URI)
+	if err != nil {
+		return nil, fmt.Errorf("file manager get: %w", err)
 	}
 
-	symbol := file.SymbolAt(ctx, params.Position)
-	if symbol == nil {
-		return nil, nil
+	node := fh.NodeAtPosition(params.Position)
+	var nodespan ast.SourceSpan
+	var fullname string
+	if inode, ok := node.(*ast.IdentNode); ok {
+		fullname = fmt.Sprintf("%s.%s", fh.parsedFile.PackageName(), inode.AsIdentifier())
+		nodespan = fh.parsedFile.LookUpSymbol(protoreflect.FullName(fullname))
 	}
 
-	docs := symbol.FormatDocs(ctx)
-	if docs == "" {
-		return nil, nil
-	}
+	s.logger.Debug(
+		"node at position",
+		"Node", node,
+		"NodeType", reflect.TypeOf(node),
+		"Position", params.Position,
+		"FullName", fullname,
+		"Span", fmt.Sprintf("%#v", nodespan),
+	)
 
-	// Escape < and > occurrences in the docs.
-	replacer := strings.NewReplacer("<", "&lt;", ">", "&gt;")
-	docs = replacer.Replace(docs)
+	nodes := fh.parsedFile.NodesAt(params.Position)
+	s.logger.Debug("nodes at position", "NodesType", nodes.TypeNames(), "Position", params.Position)
 
-	range_ := symbol.Range() // Need to spill this here because Hover.Range is a pointer.
-	return &protocol.Hover{
-		Contents: protocol.MarkupContent{
-			Kind:  protocol.Markdown,
-			Value: docs,
-		},
-		Range: &range_,
-	}, nil
+	return nil, nil
 }
 
 // Definition is the entry point for go-to-definition.
@@ -307,32 +250,45 @@ func (s *server) Definition(
 	ctx context.Context,
 	params *protocol.DefinitionParams,
 ) ([]protocol.Location, error) {
-	file := s.fileManager.Get(params.TextDocument.URI)
-	if file == nil {
-		return nil, nil
+	fh, err := s.fileManager.Get(ctx, params.TextDocument.URI)
+	if err != nil {
+		return nil, fmt.Errorf("file manager get: %w", err)
 	}
 
 	progress := newProgressFromClient(s.lsp, &params.WorkDoneProgressParams)
 	progress.Begin(ctx, "Searching")
 	defer progress.Done(ctx)
 
-	symbol := file.SymbolAt(ctx, params.Position)
-	if symbol == nil {
-		return nil, nil
+	locs, err := s.fileManager.Definition(ctx, fh, params.Position)
+	if err != nil {
+		s.logger.Debug(
+			"test fm definition fail",
+			"Error", err,
+		)
 	}
 
-	if imp, ok := symbol.kind.(*import_); ok {
-		// This is an import, we just want to jump to the file.
-		return []protocol.Location{{URI: imp.file.uri}}, nil
+	if len(locs) > 0 {
+		return locs, nil
 	}
 
-	def, _ := symbol.Definition(ctx)
-	if def != nil {
-		return []protocol.Location{{
-			URI:   def.file.uri,
-			Range: def.Range(),
-		}}, nil
-	}
+	// symbol := file.SymbolAt(ctx, params.Position)
+	// if symbol == nil {
+	// 	return nil, nil
+	// }
+
+	// if _, ok := symbol.kind.(*import_); ok {
+	// 	// This is an import, we just want to jump to the file.
+	// 	// return []protocol.Location{{URI: imp.file.uri}}, nil
+	// 	return nil, nil
+	// }
+
+	// def, _ := symbol.Definition(ctx)
+	// if def != nil {
+	// 	return []protocol.Location{{
+	// 		URI:   def.file.uri,
+	// 		Range: def.Range(),
+	// 	}}, nil
+	// }
 
 	return nil, nil
 }
@@ -342,76 +298,14 @@ func (s *server) SemanticTokensFull(
 	ctx context.Context,
 	params *protocol.SemanticTokensParams,
 ) (*protocol.SemanticTokens, error) {
-	file := s.fileManager.Get(params.TextDocument.URI)
-	if file == nil {
-		return nil, nil
+	fh, err := s.fileManager.Get(ctx, params.TextDocument.URI)
+	if err != nil {
+		return nil, fmt.Errorf("file manager get: %w", err)
 	}
 
-	progress := newProgressFromClient(s.lsp, &params.WorkDoneProgressParams)
-	progress.Begin(ctx, "Processing Tokens")
-	defer progress.Done(ctx)
+	toks := fh.SemanticTokens()
 
-	var (
-		encoded           []uint32
-		prevLine, prevCol uint32
-	)
-	for i, symbol := range file.symbols {
-		progress.Report(ctx, fmt.Sprintf("%d/%d", i+1, len(file.symbols)), float64(i)/float64(len(file.symbols)))
-
-		var semanticType uint32
-
-		if symbol.isOption {
-			semanticType = semanticTypeDecorator
-		} else if def, defNode := symbol.Definition(ctx); def != nil {
-			switch defNode.(type) {
-			case *ast.FileNode:
-				continue
-			case *ast.MessageNode, *ast.GroupNode:
-				semanticType = semanticTypeStruct
-			case *ast.FieldNode, *ast.MapFieldNode, *ast.OneofNode:
-				semanticType = semanticTypeVariable
-			case *ast.EnumNode:
-				semanticType = semanticTypeEnum
-			case *ast.EnumValueNode:
-				semanticType = semanticTypeEnumMember
-			case *ast.ServiceNode:
-				semanticType = semanticTypeInterface
-			case *ast.RPCNode:
-				semanticType = semanticTypeMethod
-			}
-		} else if _, ok := symbol.kind.(*builtin); ok {
-			semanticType = semanticTypeType
-		} else {
-			continue
-		}
-
-		// This fairly painful encoding is described in detail here:
-		// https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_semanticTokens
-		start, end := symbol.info.Start(), symbol.info.End()
-		for i := start.Line; i <= end.Line; i++ {
-			newLine := uint32(i - 1)
-			var newCol uint32
-			if i == start.Line {
-				newCol = uint32(start.Col - 1)
-				if prevLine == newLine {
-					newCol -= prevCol
-				}
-			}
-
-			symbolLen := uint32(end.Col - 1)
-			if i == start.Line {
-				symbolLen -= uint32(start.Col - 1)
-			}
-
-			encoded = append(encoded, newLine-prevLine, newCol, symbolLen, semanticType, 0)
-			prevLine = newLine
-			if i == start.Line {
-				prevCol = uint32(start.Col - 1)
-			} else {
-				prevCol = 0
-			}
-		}
-	}
-
-	return &protocol.SemanticTokens{Data: encoded}, nil
+	return &protocol.SemanticTokens{
+		Data: EncodeSemanticTokens(toks),
+	}, nil
 }

@@ -30,15 +30,15 @@ func (l *lsp) wrapReplier(reply jsonrpc2.Replier, req jsonrpc2.Request) jsonrpc2
 	return func(ctx context.Context, result any, err error) error {
 		if err != nil {
 			l.logger.Warn(
-				"responding with error",
-				slog.String("method", req.Method()),
+				"JSON-RPC Responding Error",
+				slog.String("Method", req.Method()),
 				slogext.ErrorAttr(err),
 			)
 		} else {
 			l.logger.Debug(
-				"responding",
-				slog.String("method", req.Method()),
-				slog.Any("params", result),
+				"JSON-RPC Responding",
+				slog.String("Method", req.Method()),
+				slog.Any("Params", result),
 			)
 		}
 
@@ -59,23 +59,23 @@ type connWrapper struct {
 func (c *connWrapper) Call(
 	ctx context.Context, method string, params, result any) (id jsonrpc2.ID, err error) {
 	c.logger.Debug(
-		"call",
-		slog.String("method", method),
-		slog.Any("params", params),
+		"JSON-RPC Call",
+		slog.String("Method", method),
+		slog.Any("Params", params),
 	)
 
 	id, err = c.Conn.Call(ctx, method, params, result)
 	if err != nil {
 		c.logger.Warn(
-			"call returned error",
-			slog.String("method", method),
+			"JSON-RPC Call Fail",
+			slog.String("Method", method),
 			slogext.ErrorAttr(err),
 		)
 	} else {
-		c.logger.Warn(
-			"call returned",
-			slog.String("method", method),
-			slog.Any("result", result),
+		c.logger.Debug(
+			"JSON-RPC Call Success",
+			slog.String("Method", method),
+			slog.Any("Result", result),
 		)
 	}
 
@@ -85,22 +85,22 @@ func (c *connWrapper) Call(
 func (c *connWrapper) Notify(
 	ctx context.Context, method string, params any) error {
 	c.logger.Debug(
-		"notify",
-		slog.String("method", method),
-		slog.Any("params", params),
+		"JSON-RPC Notify",
+		slog.String("Method", method),
+		slog.Any("Params", params),
 	)
 
 	err := c.Conn.Notify(ctx, method, params)
 	if err != nil {
 		c.logger.Warn(
-			"notify returned error",
-			slog.String("method", method),
+			"JSON-RPC Notify Fail",
+			slog.String("Method", method),
 			slogext.ErrorAttr(err),
 		)
 	} else {
-		c.logger.Warn(
-			"notify returned",
-			slog.String("method", method),
+		c.logger.Debug(
+			"JSON-RPC Notify Success",
+			slog.String("Method", method),
 		)
 	}
 

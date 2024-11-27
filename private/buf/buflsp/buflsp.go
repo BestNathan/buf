@@ -131,7 +131,11 @@ func (l *lsp) init(_ context.Context, params *protocol.InitializeParams) error {
 func (l *lsp) newHandler() jsonrpc2.Handler {
 	actual := protocol.ServerHandler(newServer(l), nil)
 	return func(ctx context.Context, reply jsonrpc2.Replier, req jsonrpc2.Request) (retErr error) {
-		defer slogext.DebugProfile(l.logger, slog.String("method", req.Method()), slog.Any("params", req.Params()))()
+		defer slogext.Profile(
+			l.logger,
+			"Method", req.Method(),
+			"Params", req.Params(),
+		)()
 
 		replier := l.wrapReplier(reply, req)
 

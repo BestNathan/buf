@@ -36,7 +36,7 @@ import (
 // symbol represents a named symbol inside of a buflsp.file
 type symbol struct {
 	// The file this symbol sits in.
-	file *file
+	file *fileold
 
 	// The node containing the symbol's name.
 	name ast.Node
@@ -67,7 +67,7 @@ type definition struct {
 // reference is a reference to a symbol in some other file.
 type reference struct {
 	// The file this symbol is defined in. Nil if this reference is unresolved.
-	file *file
+	file *fileold
 	// The fully qualified path of this symbol, not including its package (which is implicit from
 	// its definition file.)
 	path []string
@@ -88,7 +88,7 @@ type reference struct {
 // import_ is a symbol representing an import.
 type import_ struct {
 	// The imported file. Nil if this reference is unresolved.
-	file *file
+	file *fileold
 }
 
 // builtin is a built-in symbol.
@@ -142,190 +142,190 @@ func (s *symbol) ReferencePath() (path []string, absolute bool) {
 	return
 }
 
-// Resolve attempts to resolve an unresolved reference across fileManager.
-func (s *symbol) ResolveCrossFile(ctx context.Context) {
-	switch kind := s.kind.(type) {
-	case *definition:
-	case *builtin:
-	case *import_:
-		// These symbols do not require resolution.
+// // Resolve attempts to resolve an unresolved reference across fileManager.
+// func (s *symbol) ResolveCrossFile(ctx context.Context) {
+// 	switch kind := s.kind.(type) {
+// 	case *definition:
+// 	case *builtin:
+// 	case *import_:
+// 		// These symbols do not require resolution.
 
-	case *reference:
-		if kind.file != nil {
-			// Already resolved, not our problem!
-			return
-		}
+// 	case *reference:
+// 		if kind.file != nil {
+// 			// Already resolved, not our problem!
+// 			return
+// 		}
 
-		components, _ := s.ReferencePath()
+// 		components, _ := s.ReferencePath()
 
-		// This is a field of some foreign type. We need to track down where this is.
-		if kind.seeTypeOf != nil {
-			ref, ok := kind.seeTypeOf.kind.(*reference)
-			if !ok || ref.file == nil {
-				s.file.lsp.logger.DebugContext(
-					ctx,
-					"unexpected unresolved or non-reference symbol for seeTypeOf",
-					slog.Any("symbol", s))
-				return
-			}
+// 		// This is a field of some foreign type. We need to track down where this is.
+// 		if kind.seeTypeOf != nil {
+// 			ref, ok := kind.seeTypeOf.kind.(*reference)
+// 			if !ok || ref.file == nil {
+// 				s.file.lsp.logger.DebugContext(
+// 					ctx,
+// 					"unexpected unresolved or non-reference symbol for seeTypeOf",
+// 					slog.Any("symbol", s))
+// 				return
+// 			}
 
-			// Find the definition that contains the type we want.
-			def, node := kind.seeTypeOf.Definition(ctx)
-			if def == nil {
-				s.file.lsp.logger.DebugContext(
-					ctx,
-					"could not resolve dependent symbol definition",
-					slog.Any("symbol", s),
-					slog.Any("dep", kind.seeTypeOf))
-				return
-			}
+// 			// Find the definition that contains the type we want.
+// 			def, node := kind.seeTypeOf.Definition(ctx)
+// 			if def == nil {
+// 				s.file.lsp.logger.DebugContext(
+// 					ctx,
+// 					"could not resolve dependent symbol definition",
+// 					slog.Any("symbol", s),
+// 					slog.Any("dep", kind.seeTypeOf))
+// 				return
+// 			}
 
-			// Node here should be some kind of field.
-			// TODO: Support more exotic field types.
-			field, ok := node.(*ast.FieldNode)
-			if !ok {
-				s.file.lsp.logger.DebugContext(
-					ctx,
-					"dependent symbol definition was not a field",
-					slog.Any("symbol", s),
-					slog.Any("dep", kind.seeTypeOf),
-					slog.Any("def", def))
-				return
-			}
+// 			// Node here should be some kind of field.
+// 			// TODO: Support more exotic field types.
+// 			field, ok := node.(*ast.FieldNode)
+// 			if !ok {
+// 				s.file.lsp.logger.DebugContext(
+// 					ctx,
+// 					"dependent symbol definition was not a field",
+// 					slog.Any("symbol", s),
+// 					slog.Any("dep", kind.seeTypeOf),
+// 					slog.Any("def", def))
+// 				return
+// 			}
 
-			// Now, find the symbol for the field's type in the file's symbol table.
-			// Searching by offset is faster.
-			info := def.file.fileNode.NodeInfo(field.FldType)
-			ty := def.file.SymbolAt(ctx, protocol.Position{
-				Line:      uint32(info.Start().Line) - 1,
-				Character: uint32(info.Start().Col) - 1,
-			})
-			if ty == nil {
-				s.file.lsp.logger.DebugContext(
-					ctx,
-					"dependent symbol's field type didn't resolve",
-					slog.Any("symbol", s),
-					slog.Any("dep", kind.seeTypeOf),
-					slog.Any("def", def))
-				return
-			}
+// 			// Now, find the symbol for the field's type in the file's symbol table.
+// 			// Searching by offset is faster.
+// 			info := def.file.fileNode.NodeInfo(field.FldType)
+// 			ty := def.file.SymbolAt(ctx, protocol.Position{
+// 				Line:      uint32(info.Start().Line) - 1,
+// 				Character: uint32(info.Start().Col) - 1,
+// 			})
+// 			if ty == nil {
+// 				s.file.lsp.logger.DebugContext(
+// 					ctx,
+// 					"dependent symbol's field type didn't resolve",
+// 					slog.Any("symbol", s),
+// 					slog.Any("dep", kind.seeTypeOf),
+// 					slog.Any("def", def))
+// 				return
+// 			}
 
-			// This will give us enough information to figure out the path of this
-			// symbol, namely, the name of the thing the symbol is inside of. We don't
-			// actually validate if the dependent symbol exists, because that will happen for us
-			// when we go to hover over the symbol.
-			ref, ok = ty.kind.(*reference)
-			if !ok || ty.file == nil {
-				s.file.lsp.logger.DebugContext(
-					ctx,
-					"dependent symbol's field type didn't resolve to a reference",
-					slog.Any("symbol", s),
-					slog.Any("dep", kind.seeTypeOf),
-					slog.Any("def", def),
-					slog.Any("resolved", ty))
-				return
-			}
+// 			// This will give us enough information to figure out the path of this
+// 			// symbol, namely, the name of the thing the symbol is inside of. We don't
+// 			// actually validate if the dependent symbol exists, because that will happen for us
+// 			// when we go to hover over the symbol.
+// 			ref, ok = ty.kind.(*reference)
+// 			if !ok || ty.file == nil {
+// 				s.file.lsp.logger.DebugContext(
+// 					ctx,
+// 					"dependent symbol's field type didn't resolve to a reference",
+// 					slog.Any("symbol", s),
+// 					slog.Any("dep", kind.seeTypeOf),
+// 					slog.Any("def", def),
+// 					slog.Any("resolved", ty))
+// 				return
+// 			}
 
-			// Done.
-			kind.file = def.file
-			kind.path = append(slicesext.Copy(ref.path), components...)
-			return
-		}
+// 			// Done.
+// 			kind.file = def.file
+// 			kind.path = append(slicesext.Copy(ref.path), components...)
+// 			return
+// 		}
 
-		if kind.isNonCustomOptionIn != nil {
-			var optionsType []string
-			switch kind.isNonCustomOptionIn.(type) {
-			case *ast.FileNode:
-				optionsType = []string{"FileOptions"}
-			case *ast.MessageNode:
-				optionsType = []string{"MessageOptions"}
-			case *ast.FieldNode, *ast.MapFieldNode:
-				optionsType = []string{"FieldOptions"}
-			case *ast.OneofNode:
-				optionsType = []string{"OneofOptions"}
-			case *ast.EnumNode:
-				optionsType = []string{"EnumOptions"}
-			case *ast.EnumValueNode:
-				optionsType = []string{"EnumValueOptions"}
-			case *ast.ServiceNode:
-				optionsType = []string{"ServiceOptions"}
-			case *ast.RPCNode:
-				optionsType = []string{"MethodOptions"}
-			case *ast.ExtensionRangeNode:
-				optionsType = []string{"DescriptorProto", "ExtensionRangeOptions"}
-			default:
-				// This node cannot contain options.
-				return
-			}
+// 		if kind.isNonCustomOptionIn != nil {
+// 			var optionsType []string
+// 			switch kind.isNonCustomOptionIn.(type) {
+// 			case *ast.FileNode:
+// 				optionsType = []string{"FileOptions"}
+// 			case *ast.MessageNode:
+// 				optionsType = []string{"MessageOptions"}
+// 			case *ast.FieldNode, *ast.MapFieldNode:
+// 				optionsType = []string{"FieldOptions"}
+// 			case *ast.OneofNode:
+// 				optionsType = []string{"OneofOptions"}
+// 			case *ast.EnumNode:
+// 				optionsType = []string{"EnumOptions"}
+// 			case *ast.EnumValueNode:
+// 				optionsType = []string{"EnumValueOptions"}
+// 			case *ast.ServiceNode:
+// 				optionsType = []string{"ServiceOptions"}
+// 			case *ast.RPCNode:
+// 				optionsType = []string{"MethodOptions"}
+// 			case *ast.ExtensionRangeNode:
+// 				optionsType = []string{"DescriptorProto", "ExtensionRangeOptions"}
+// 			default:
+// 				// This node cannot contain options.
+// 				return
+// 			}
 
-			fieldPath := append(optionsType, kind.path...)
+// 			fieldPath := append(optionsType, kind.path...)
 
-			if slices.Equal(fieldPath, []string{"FieldOptions", "default"}) {
-				// This one is a bit magical.
-				s.kind = &builtin{name: "default"}
-				return
-			}
+// 			if slices.Equal(fieldPath, []string{"FieldOptions", "default"}) {
+// 				// This one is a bit magical.
+// 				s.kind = &builtin{name: "default"}
+// 				return
+// 			}
 
-			// Look for a symbol with this exact path in descriptor proto.
-			descriptorProto := s.file.importToFile[descriptorPath]
-			if descriptorProto == nil {
-				return
-			}
-			var fieldSymbol *symbol
-			for _, symbol := range descriptorProto.symbols {
-				if def, ok := symbol.kind.(*definition); ok && slices.Equal(def.path, fieldPath) {
-					fieldSymbol = symbol
-					break
-				}
-			}
-			if fieldSymbol == nil {
-				return
-			}
+// 			// Look for a symbol with this exact path in descriptor proto.
+// 			descriptorProto := s.file.importToFile[descriptorPath]
+// 			if descriptorProto == nil {
+// 				return
+// 			}
+// 			var fieldSymbol *symbol
+// 			for _, symbol := range descriptorProto.symbols {
+// 				if def, ok := symbol.kind.(*definition); ok && slices.Equal(def.path, fieldPath) {
+// 					fieldSymbol = symbol
+// 					break
+// 				}
+// 			}
+// 			if fieldSymbol == nil {
+// 				return
+// 			}
 
-			kind.file = descriptorProto
-			kind.path = fieldPath
-			return
-		}
+// 			kind.file = descriptorProto
+// 			kind.path = fieldPath
+// 			return
+// 		}
 
-		if s.file.importToFile == nil {
-			// Hopeless. We'll have to try again once we have imports!
-			return
-		}
+// 		if s.file.importToFile == nil {
+// 			// Hopeless. We'll have to try again once we have imports!
+// 			return
+// 		}
 
-		for _, imported := range s.file.importToFile {
-			// If necessary, refresh the file. Note that this cannot hit
-			// cycles, because fileNode will become non-nil after calling
-			// Refresh but before calling IndexSymbols.
-			if imported.fileNode == nil {
-				imported.Refresh(ctx)
-			}
+// 		for _, imported := range s.file.importToFile {
+// 			// If necessary, refresh the file. Note that this cannot hit
+// 			// cycles, because fileNode will become non-nil after calling
+// 			// Refresh but before calling IndexSymbols.
+// 			if imported.fileNode == nil {
+// 				imported.Refresh(ctx)
+// 			}
 
-			// Need to check two paths; components on its own, and components
-			// with s.file's package prepended.
+// 			// Need to check two paths; components on its own, and components
+// 			// with s.file's package prepended.
 
-			// First, try removing the imported file's package from components.
-			path, ok := slicesext.TrimPrefix(components, imported.Package())
-			if !ok {
-				// If that doesn't work, try appending the importee's package.
-				// This is necessary because protobuf allows for partial package
-				// names to appear in references.
-				path, ok = slicesext.TrimPrefix(
-					slices.Concat(s.file.Package(), components),
-					imported.Package(),
-				)
-				if !ok {
-					continue
-				}
-			}
+// 			// First, try removing the imported file's package from components.
+// 			path, ok := slicesext.TrimPrefix(components, imported.Package())
+// 			if !ok {
+// 				// If that doesn't work, try appending the importee's package.
+// 				// This is necessary because protobuf allows for partial package
+// 				// names to appear in references.
+// 				path, ok = slicesext.TrimPrefix(
+// 					slices.Concat(s.file.Package(), components),
+// 					imported.Package(),
+// 				)
+// 				if !ok {
+// 					continue
+// 				}
+// 			}
 
-			if findDeclByPath(imported.fileNode.Decls, path) != nil {
-				kind.file = imported
-				kind.path = path
-				break
-			}
-		}
-	}
-}
+// 			if findDeclByPath(imported.fileNode.Decls, path) != nil {
+// 				kind.file = imported
+// 				kind.path = path
+// 				break
+// 			}
+// 		}
+// 	}
+// }
 
 func (s *symbol) LogValue() slog.Value {
 	attrs := []slog.Attr{slog.String("file", s.file.uri.Filename())}
@@ -412,8 +412,8 @@ func (s *symbol) FormatDocs(ctx context.Context) string {
 	}
 
 	pkg := "<empty>"
-	if pkgNode := def.file.packageNode; pkgNode != nil {
-		pkg = string(pkgNode.Name.AsIdentifier())
+	if pkgNode := def.file.Package(); pkgNode != "" {
+		pkg = pkgNode
 	}
 
 	what := "unresolved"
@@ -525,7 +525,7 @@ func (s *symbol) FormatDocs(ctx context.Context) string {
 
 // symbolWalker is an AST walker that generates the symbol table for a file in IndexSymbols().
 type symbolWalker struct {
-	file    *file
+	file    *fileold
 	symbols []*symbol
 
 	// This is the set of *ast.MessageNode, *ast.EnumNode, and *ast.ServiceNode that
@@ -542,7 +542,7 @@ type symbolWalker struct {
 }
 
 // newWalker constructs a new walker from a file, constructing any necessary book-keeping.
-func newWalker(file *file) *symbolWalker {
+func newWalker(file *fileold) *symbolWalker {
 	walker := &symbolWalker{
 		file: file,
 	}
@@ -579,9 +579,6 @@ func (w *symbolWalker) Walk(node, parent ast.Node) {
 		symbol := w.newSymbol(node.Name)
 		import_ := new(import_)
 		symbol.kind = import_
-		if imported, ok := w.file.importToFile[node.Name.AsString()]; ok {
-			import_.file = imported
-		}
 
 	case *ast.MessageNode:
 		w.newDef(node, node.Name)
@@ -762,7 +759,8 @@ func (w *symbolWalker) newRef(name ast.IdentValueNode) *symbol {
 	}
 
 	// Also try with the package removed.
-	if path, ok := slicesext.TrimPrefix(components, symbol.file.Package()); ok {
+	pkgs := strings.Split(symbol.file.Package(), ".")
+	if path, ok := slicesext.TrimPrefix(components, pkgs); ok {
 		if findDeclByPath(w.file.fileNode.Decls, path) != nil {
 			ref.file = w.file
 			ref.path = path

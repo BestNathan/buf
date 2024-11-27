@@ -56,6 +56,34 @@ func DebugProfile(logger *slog.Logger, extraFields ...any) func() {
 	}
 }
 
+func Profile(logger *slog.Logger, args ...any) func() {
+	if logger == nil {
+		return func() {}
+	}
+
+	pc, _, _, ok := runtime.Caller(1)
+	callerName := "unknown"
+	if ok {
+		callerFunc := runtime.FuncForPC(pc)
+		if callerFunc != nil {
+			callerName = callerFunc.Name()
+		}
+	}
+
+	start := time.Now()
+
+	return func() {
+		logger.Debug(
+			"Profile Done",
+			append([]any{
+				"Func", callerName,
+				"StartTime", start.String(),
+				"Duration", time.Since(start),
+			}, args...)...,
+		)
+	}
+}
+
 // *** PRIVATE ***
 
 type nopHandler struct{}
